@@ -398,24 +398,13 @@ def _generate_resource_filtering_figure(
     selected_seed = None
     selected_node = None
 
-    # Prefer a task with at least one rejected node so the screenshot visibly
-    # demonstrates the filtering stage rather than showing an all-PASS table.
-    filtered_tasks = filtering_audit.loc[
-        ~filtering_audit["feasible"].astype(bool),
-        ["seed", "task_id"],
-    ].drop_duplicates().sort_values(["seed", "task_id"])
-
-    if not filtered_tasks.empty:
-        first_filtered = filtered_tasks.iloc[0]
-        selected_task = int(first_filtered["task_id"])
-        selected_seed = int(first_filtered["seed"])
-
-    if selected_task is None and not selection_audit.empty:
+    if not selection_audit.empty:
         first_selection = selection_audit.sort_values(
             ["seed", "task_id"]
         ).iloc[0]
         selected_task = int(first_selection["task_id"])
         selected_seed = int(first_selection["seed"])
+        selected_node = int(first_selection["node_id"])
 
     if selected_task is None:
         first_audit = filtering_audit.sort_values(
@@ -423,14 +412,6 @@ def _generate_resource_filtering_figure(
         ).iloc[0]
         selected_task = int(first_audit["task_id"])
         selected_seed = int(first_audit["seed"])
-
-    matching_selection = selection_audit.loc[
-        (selection_audit["seed"] == selected_seed)
-        & (selection_audit["task_id"] == selected_task)
-    ] if not selection_audit.empty else pd.DataFrame()
-
-    if not matching_selection.empty:
-        selected_node = int(matching_selection.iloc[0]["node_id"])
 
     task_audit = filtering_audit.loc[
         (filtering_audit["seed"] == selected_seed)
@@ -534,9 +515,8 @@ def _generate_resource_filtering_figure(
             ]
         )
 
-    figure_height = max(10.0, 5.5 + 0.55 * len(table_rows))
     figure, axis = plt.subplots(
-        figsize=(17, figure_height)
+        figsize=(17, 9)
     )
     axis.axis("off")
 
@@ -549,12 +529,12 @@ def _generate_resource_filtering_figure(
 
     requirements = (
         f"Task T{selected_task} | {priority_class} | Seed {selected_seed}\n"
-        f"CPU {first['cpu_required']:.2f} | "
-        f"Memory {first['memory_required']:.2f} | "
-        f"Bandwidth {first['bandwidth_required']:.2f} | "
-        f"Latency ≤ {first['latency_limit']:.2f} | "
-        f"Energy ≤ {first['energy_budget']:.2f} | "
-        f"Queue < {int(first['queue_limit'])}"
+        f"CPU {first['cpu_required']:.2f} GC/s | "
+        f"Memory {first['memory_required']:.2f} GB | "
+        f"Bandwidth {first['bandwidth_required']:.2f} Mbps | "
+        f"Latency ≤ {first['latency_limit']:.2f} ms | "
+        f"Energy ≤ {first['energy_budget']:.2f} J | "
+        f"Queue < {int(first['queue_limit'])} tasks"
     )
     axis.text(
         0.5,
@@ -570,23 +550,23 @@ def _generate_resource_filtering_figure(
         cellText=table_rows,
         colLabels=[
             "Edge",
-            "CPU\navail / req",
-            "Memory\navail / req",
-            "Bandwidth\navail / req",
-            "Latency\nest. / limit",
-            "Energy\nest. / budget",
-            "Queue\ncurrent / limit",
+            "CPU (GC/s)\navail / req",
+            "Memory (GB)\navail / req",
+            "Bandwidth (Mbps)\navail / req",
+            "Latency (ms)\nest. / limit",
+            "Energy (J)\nest. / budget",
+            "Queue (Tasks)\ncurrent / limit",
             "Feasible /\nSelection",
             "Rejection\nReason",
         ],
         cellLoc="center",
         colLoc="center",
         colWidths=[0.07, 0.105, 0.105, 0.105, 0.105, 0.105, 0.10, 0.105, 0.13],
-        bbox=[0.015, 0.30, 0.97, 0.52],
+        bbox=[0.015, 0.31, 0.97, 0.49],
     )
     table.auto_set_font_size(False)
-    table.set_fontsize(8.0)
-    table.scale(1.0, 1.0)
+    table.set_fontsize(8.5)
+    table.scale(1.0, 1.7)
 
     for column_index in range(9):
         table[(0, column_index)].set_text_props(fontweight="bold")
@@ -735,8 +715,9 @@ Edge Nodes
         "## Resource Filtering Audit",
         "",
         (
-            "Every task-node pair is checked for CPU, memory, bandwidth, "
-            "latency, energy and queue feasibility before policy selection."
+            "Every task-node pair is checked for CPU (GC/s), memory (GB), "
+            "bandwidth (Mbps), latency (ms), energy (J), and queue length "
+            "(tasks) before policy selection."
         ),
         "",
         "The generated audit figure is `figures/resource_filtering_selection_audit.png`.",
