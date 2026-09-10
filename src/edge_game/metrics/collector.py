@@ -39,7 +39,7 @@ class MetricCollector:
         default_factory=list
     )
 
-    node_state_history: List[dict] = field(
+    node_utilization_history: List[dict] = field(
         default_factory=list
     )
 
@@ -264,6 +264,7 @@ class MetricCollector:
     def record_state(
         self,
         nodes: list[EdgeNode],
+        simulation_step: int | None = None,
     ) -> None:
         """Record a system-state snapshot."""
         if not nodes:
@@ -312,6 +313,19 @@ class MetricCollector:
             )
         )
 
+        if simulation_step is not None:
+            for node in nodes:
+                self.node_utilization_history.append(
+                    {
+                        "simulation_step": int(simulation_step),
+                        "node_id": int(node.node_id),
+                        "server_id": int(node.server_id),
+                        "cpu_utilization": float(
+                            node.load_ratio() * 100.0
+                        ),
+                    }
+                )
+
         self.utilization_history.append(
             utilization
         )
@@ -327,20 +341,6 @@ class MetricCollector:
         self.queue_length_history.append(
             average_queue
         )
-
-        tick = len(self.utilization_history) - 1
-        for node in nodes:
-            self.node_state_history.append(
-                {
-                    "tick": int(tick),
-                    "node_id": int(node.node_id),
-                    "server_id": int(node.server_id),
-                    "cpu_utilization": float(node.load_ratio()),
-                    "memory_utilization": float(node.memory_load_ratio()),
-                    "bandwidth_utilization": float(node.bandwidth_load_ratio()),
-                    "queue_length": int(node.queue_length),
-                }
-            )
 
     def priority_success_ratios(self) -> dict[int, float]:
         """Calculate completion ratios for each priority class."""
