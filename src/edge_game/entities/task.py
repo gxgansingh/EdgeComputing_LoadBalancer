@@ -10,11 +10,16 @@ class Task:
     task_id: int
     priority: int
 
+    # CPU demand in GC/s (Gigacycles per Second).
     cpu_demand: float
+    # Memory demand in GB (Gigabytes).
     memory_demand: float
+    # Network bandwidth demand in Mbps (Megabits per Second).
     bandwidth_demand: float
 
+    # Maximum acceptable latency in milliseconds.
     latency_requirement: float
+    # Maximum task energy budget in Joules.
     energy_budget: float
     workload_size: float
 
