@@ -27,16 +27,22 @@ class FeasibilityAudit:
     energy_pass: bool
     queue_pass: bool
     feasible: bool
+    # CPU fields are measured in GC/s.
     cpu_available: float
     cpu_required: float
+    # Memory fields are measured in GB.
     memory_available: float
     memory_required: float
+    # Bandwidth fields are measured in Mbps.
     bandwidth_available: float
     bandwidth_required: float
+    # Latency fields are measured in ms.
     estimated_latency: float
     latency_limit: float
+    # Energy fields are measured in Joules.
     estimated_energy: float
     energy_budget: float
+    # Queue fields are measured as number of tasks.
     queue_length: int
     queue_limit: int
     rejection_reasons: str
@@ -47,7 +53,7 @@ def estimate_node_latency(
     node: EdgeNode,
     config: SimulationConfig,
 ) -> float:
-    """Estimate task latency from current queue and resource pressure."""
+    """Estimate task latency in milliseconds from current resource pressure."""
     load_pressure = (
         node.load_ratio()
         + node.memory_load_ratio()
@@ -74,7 +80,7 @@ def estimate_task_energy(
     node: EdgeNode,
     config: SimulationConfig,
 ) -> float:
-    """Estimate the energy required to execute a task on a node."""
+    """Estimate task execution energy in Joules."""
     utilization_factor = 1.0 + node.load_ratio()
 
     return float(
@@ -90,7 +96,13 @@ def evaluate_node_feasibility(
     node: EdgeNode,
     config: SimulationConfig,
 ) -> FeasibilityAudit:
-    """Evaluate all resource constraints without selecting a node."""
+    """Evaluate all resource constraints without selecting a node.
+
+    The feasibility checks use physical units directly: GC/s for CPU, GB for
+    memory, Mbps for bandwidth, ms for latency, J for energy, and task count
+    for queue length. This function only determines feasibility; it never
+    performs the final game-theoretic node selection.
+    """
     cpu_pass = node.available_cpu >= task.cpu_demand
     memory_pass = node.available_memory >= task.memory_demand
     bandwidth_pass = node.available_bandwidth >= task.bandwidth_demand
