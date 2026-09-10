@@ -24,7 +24,7 @@ class ExperimentResult:
     selection_records: list[dict]
     decision_records: list[dict]
     filtering_records: list[dict]
-    node_state_records: list[dict]
+    node_utilization_records: list[dict]
 
 
 def run_policy_experiment(
@@ -45,7 +45,7 @@ def run_policy_experiment(
 
     next_task_id = 0
 
-    for _ in range(
+    for simulation_step in range(
         config.simulation_steps
     ):
         tasks = environment.create_tasks(
@@ -80,6 +80,7 @@ def run_policy_experiment(
                         "energy_pass": audit.energy_pass,
                         "queue_pass": audit.queue_pass,
                         "feasible": audit.feasible,
+                        # Legacy field names are retained for API compatibility.
                         "cpu_available": audit.cpu_available,
                         "cpu_required": audit.cpu_required,
                         "memory_available": audit.memory_available,
@@ -92,6 +93,19 @@ def run_policy_experiment(
                         "energy_budget": audit.energy_budget,
                         "queue_length": audit.queue_length,
                         "queue_limit": audit.queue_limit,
+                        # Explicit unit-qualified columns for research artifacts.
+                        "cpu_available_gc_s": audit.cpu_available,
+                        "cpu_required_gc_s": audit.cpu_required,
+                        "memory_available_gb": audit.memory_available,
+                        "memory_required_gb": audit.memory_required,
+                        "bandwidth_available_mbps": audit.bandwidth_available,
+                        "bandwidth_required_mbps": audit.bandwidth_required,
+                        "estimated_latency_ms": audit.estimated_latency,
+                        "latency_limit_ms": audit.latency_limit,
+                        "estimated_energy_j": audit.estimated_energy,
+                        "energy_budget_j": audit.energy_budget,
+                        "queue_length_tasks": audit.queue_length,
+                        "queue_limit_tasks": audit.queue_limit,
                         "rejection_reasons": audit.rejection_reasons,
                     }
                     for audit in feasibility_audits
@@ -153,7 +167,8 @@ def run_policy_experiment(
             )
 
         metrics.record_state(
-            nodes=nodes
+            nodes=nodes,
+            simulation_step=simulation_step,
         )
 
         completed_tasks = (
@@ -178,5 +193,7 @@ def run_policy_experiment(
             metrics.decision_records
         ),
         filtering_records=filtering_records,
-        node_state_records=list(metrics.node_state_history),
+        node_utilization_records=list(
+            metrics.node_utilization_history
+        ),
     )
