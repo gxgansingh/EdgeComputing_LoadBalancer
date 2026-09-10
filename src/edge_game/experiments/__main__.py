@@ -7,12 +7,12 @@ from pathlib import Path
 
 from ..config import SimulationConfig
 from .ablation import run_ablation_experiment
-from .benchmark import run_load_balancer_benchmark
 from .module1 import run_module1_experiment
 from .module2 import run_module2_experiment
 from .module3 import run_module3_experiment
 from .performance_matrix import run_performance_matrix
 from .research_pipeline import run_full_research_pipeline
+from .benchmark import run_load_balancer_benchmark
 from .module2_comparison import (
     generate_module2_comparison,
 )
@@ -63,6 +63,19 @@ def main() -> None:
 
     command = sys.argv[1]
 
+    if command == "benchmark":
+        outputs = run_load_balancer_benchmark(config)
+        print("Load-balancer benchmark completed.")
+        print(f"Simulation ticks per run: {config.benchmark_simulation_steps}")
+        print(f"Repeated runs: {config.benchmark_experiment_repetitions}")
+        print(f"Results: {outputs['output_directory']}")
+        print(f"Single-run graph: {outputs['single_run_graph']}")
+        print(f"10-run graph: {outputs['ten_run_time_series_graph']}")
+        print(f"Benchmark table: {outputs['ten_run_benchmark_summary']}")
+        print(f"Filtering audit: {outputs['resource_filtering_audit']}")
+        print(f"Professor screenshot: {outputs['resource_filtering_screenshot']}")
+        return
+
     if command == "full-evaluation":
         result = run_full_research_pipeline(config)
         print("Full research evaluation completed.")
@@ -80,77 +93,6 @@ def main() -> None:
             ),
         )
     )
-
-    if command == "benchmark":
-        output_directory = (
-            Path(config.output_directory)
-            / "load_balancer_benchmark"
-        )
-
-        benchmark_seeds = tuple(
-            range(
-                config.experiment_seed_start,
-                config.experiment_seed_start
-                + config.experiment_repetitions,
-            )
-        )
-
-        outputs = run_load_balancer_benchmark(
-            config=config,
-            seeds=benchmark_seeds,
-            output_directory=output_directory,
-        )
-
-        print("Load-balancer benchmark completed.")
-        print("Primary policy: MFG Load Balancer")
-        print("Reference policy: Least-Loaded Baseline")
-        print(f"Single-run seed: {benchmark_seeds[0]}")
-        print(f"Repeated runs: {len(benchmark_seeds)}")
-        print(f"Results saved to: {output_directory}")
-
-        print("\nGenerated tabular results:")
-        print(f"Single-run metrics: {outputs['single_metrics']}")
-        print(f"Single-run node utilization: {outputs['single_node_utilization']}")
-        print(f"Single-run node summary: {outputs['single_node_summary']}")
-        print(f"Resource filtering audit: {outputs['resource_filtering_audit']}")
-        print(f"Resource filtering summary: {outputs['resource_filtering_summary']}")
-        print(f"Professor screenshot: {outputs['resource_filtering_figure']}")
-        print(f"10-run raw results: {outputs['ten_run_raw']}")
-        print(f"10-run summary: {outputs['ten_run_summary']}")
-        print(f"10-run node raw results: {outputs['ten_run_node_raw']}")
-        print(f"10-run node summary: {outputs['ten_run_node_summary']}")
-        print(f"10-run time-series raw: {outputs['ten_run_time_series_raw']}")
-        print(f"10-run time-series summary: {outputs['ten_run_time_series_summary']}")
-
-        print("\nGenerated benchmark figures:")
-        print(f"Single-run utilization figure: {outputs['single_figure']}")
-        print(f"10-run node utilization figure: {outputs['ten_run_node_figure']}")
-        print(f"10-run time-series figure: {outputs['ten_run_time_series_figure']}")
-        print(f"All metric comparison figures: {output_directory / 'figures'}")
-        print(f"Report: {outputs['report']}")
-
-        import pandas as pd
-        single_table = pd.read_csv(outputs['single_metrics'])
-        repeated_table = pd.read_csv(outputs['ten_run_summary'])
-        print("\nSingle-run benchmark table:")
-        print(single_table.to_string(index=False))
-        print("\n10-run benchmark summary table:")
-        selected_metrics = repeated_table.loc[
-            repeated_table['metric'].isin([
-                'utility_mean',
-                'response_time_mean',
-                'throughput',
-                'success_ratio',
-                'resource_utilization',
-                'load_variance',
-                'jains_fairness_index',
-                'average_queue_length',
-                'rejected_tasks',
-            ]),
-            ['policy_label', 'metric', 'mean', 'std', 'ci95_lower', 'ci95_upper'],
-        ]
-        print(selected_metrics.to_string(index=False))
-        return
 
     if command == "module1":
         output_directory = (
