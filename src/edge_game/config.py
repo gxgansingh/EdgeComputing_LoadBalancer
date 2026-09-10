@@ -1,6 +1,32 @@
-"""Simulation configuration."""
+"""Simulation configuration and canonical resource units."""
 
 from dataclasses import dataclass
+
+
+# Canonical physical units used by the simulation resource model and audit.
+# CPU: 1 GC/s = 10^9 CPU cycles per second.
+# Memory: GB means gigabytes.
+# Bandwidth: Mbps means megabits per second.
+# Latency: milliseconds.
+# Energy: joules.
+# Queue: number of tasks.
+RESOURCE_UNITS = {
+    "cpu": "GC/s",
+    "memory": "GB",
+    "bandwidth": "Mbps",
+    "latency": "ms",
+    "energy": "J",
+    "queue": "tasks",
+}
+
+RESOURCE_UNIT_DESCRIPTIONS = {
+    "cpu": "Gigacycles per Second",
+    "memory": "Gigabytes",
+    "bandwidth": "Megabits per Second",
+    "latency": "Milliseconds",
+    "energy": "Joules",
+    "queue": "Number of Tasks",
+}
 
 
 @dataclass(frozen=True)
@@ -17,15 +43,19 @@ class SimulationConfig:
     number_of_servers: int = 3
     nodes_per_server: int = 5
 
+    # CPU capacity in GC/s (Gigacycles per Second).
     minimum_cpu_capacity: float = 10.0
     maximum_cpu_capacity: float = 30.0
 
+    # Memory capacity in GB (Gigabytes).
     minimum_memory_capacity: float = 8.0
     maximum_memory_capacity: float = 32.0
 
+    # Network bandwidth capacity in Mbps (Megabits per Second).
     minimum_bandwidth: float = 10.0
     maximum_bandwidth: float = 100.0
 
+    # Task resource requirements use the same physical units as node capacity.
     minimum_cpu_demand: float = 1.0
     maximum_cpu_demand: float = 8.0
 
@@ -38,9 +68,11 @@ class SimulationConfig:
     minimum_workload_size: float = 1.0
     maximum_workload_size: float = 10.0
 
+    # Maximum acceptable communication latency in milliseconds.
     minimum_latency_requirement: float = 5.0
     maximum_latency_requirement: float = 50.0
 
+    # Task energy budget in Joules.
     minimum_energy_budget: float = 1.0
     maximum_energy_budget: float = 20.0
 
@@ -103,6 +135,7 @@ class SimulationConfig:
     # Dynamic resource-summary configuration.
     resource_summary_update_interval: int = 1
 
+    # Maximum number of queued/active tasks allowed by the feasibility filter.
     maximum_queue_length: int = 20
 
     # Active external network-load factor used by the feasibility model.
@@ -127,23 +160,23 @@ class SimulationConfig:
     latency_workload_penalty: float = 0.50
 
     # Feasibility-audit energy model.
+    # Energy consumed per unit of CPU work, expressed so the resulting
+    # task energy estimate is measured in Joules.
     energy_per_cpu_work_unit: float = 0.25
-
-    # Load-balancer benchmark configuration.
-    # The benchmark uses a compact 40-tick trace so the per-node utilization
-    # curve remains comparable to a presentation-scale load-balancing plot.
-    benchmark_simulation_steps: int = 2500
-    benchmark_mean_field_state_points: int = 11
-    benchmark_mean_field_max_iterations: int = 20
-    benchmark_mean_field_tolerance: float = 1e-2
-    benchmark_mean_field_policy_tolerance: float = 1e-3
-    benchmark_mean_field_raw_policy_tolerance: float = 1e-2
-    benchmark_fpk_max_iterations: int = 50
-    benchmark_fpk_tolerance: float = 1e-2
 
     # Repeated experiment configuration.
     experiment_repetitions: int = 10
     experiment_seed_start: int = 42
+
+    # Load-balancer benchmark configuration.
+    benchmark_simulation_steps: int = 2500
+    benchmark_experiment_repetitions: int = 10
+    benchmark_seed_start: int = 42
+    benchmark_number_of_servers: int = 1
+    benchmark_nodes_per_server: int = 3
+    benchmark_mean_field_state_points: int = 11
+    benchmark_mean_field_max_iterations: int = 20
+    benchmark_fpk_max_iterations: int = 50
 
     workload_scenarios: tuple[str, ...] = (
         "default",
