@@ -1,23 +1,24 @@
-"""Benchmark the edge load balancer on single and repeated runs."""
+"""Load-balancer benchmarking with single-run and repeated-run evaluation."""
 
 from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import gc
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy import stats
+from scipy.stats import t
 
-from ..algorithms.experiment import ExperimentResult, run_policy_experiment
+from ..algorithms.experiment import run_policy_experiment
 from ..algorithms.policy import BaselinePolicy
 from ..config import SimulationConfig
 from .runner import build_mean_field_policy
 from .module2 import _generate_resource_filtering_figure, _summarize_filtering_audit
 
 
-BENCHMARK_METRICS = (
+METRICS = (
     "utility_mean",
     "response_time_mean",
     "throughput",
@@ -29,552 +30,441 @@ BENCHMARK_METRICS = (
     "rejected_tasks",
 )
 
-POLICY_LABELS = {
-    "mfg_priority": "MFG Load Balancer",
-    "least_loaded": "Least-Loaded Baseline",
-}
 
-
-def _run_policy(
-    config: SimulationConfig,
-    seed: int,
-    policy_key: str,
-    mfg_policy=None,
-) -> ExperimentResult:
-    """Run one benchmark policy for one seed."""
+def _run_policy(config: SimulationConfig, seed: int, policy_name: str, policy):
+    """Run one policy and return its result."""
     seed_config = replace(config, seed=seed)
-
-    if policy_key == "mfg_priority":
-        if mfg_policy is None:
-            mfg_policy, _ = build_mean_field_policy(
-                config=seed_config,
-                ablation_variant="full",
-            )
-        policy = mfg_policy
-    elif policy_key == "least_loaded":
-        policy = BaselinePolicy(config=seed_config)
-    else:
-        raise ValueError(f"Unknown benchmark policy: {policy_key}")
-
     return run_policy_experiment(
         config=seed_config,
-        policy_name=POLICY_LABELS[policy_key],
+        policy_name=policy_name,
         policy=policy,
     )
 
 
-def _metric_row(
-    seed: int,
-    policy_key: str,
-    result: ExperimentResult,
-    equilibrium_diagnostics: dict | None = None,
-) -> dict:
-    """Convert one experiment result into a benchmark row."""
-    row = {
-        "seed": int(seed),
-        "policy": policy_key,
-        "policy_label": POLICY_LABELS[policy_key],
-    }
-    row.update({metric: float(result.metrics.get(metric, 0.0)) for metric in BENCHMARK_METRICS})
-    diagnostics = equilibrium_diagnostics or {}
-    row["equilibrium_converged"] = bool(
-        diagnostics.get("converged", result.metrics.get("equilibrium_converged", True))
+def _run_mfg(config: SimulationConfig, seed: int):
+    """Build an equilibrium and run the MFG load balancer."""
+    seed_config = replace(config, seed=seed)
+    policy, diagnostics = build_mean_field_policy(
+        config=seed_config,
+        ablation_variant="full",
     )
-    row["equilibrium_iterations"] = int(
-        diagnostics.get("iterations", result.metrics.get("equilibrium_iterations", 0))
+    result = run_policy_experiment(
+        config=seed_config,
+        policy_name="mfg_load_balancer",
+        policy=policy,
     )
-    row["equilibrium_distribution_residual"] = float(
-        diagnostics.get("distribution_residual", result.metrics.get("equilibrium_distribution_residual", 0.0))
+    return result, diagnostics
+
+
+def _run_baseline(config: SimulationConfig, seed: int):
+    """Run the least-loaded feasible-node baseline."""
+    seed_config = replace(config, seed=seed)
+    policy = BaselinePolicy(config=seed_config)
+    result = run_policy_experiment(
+        config=seed_config,
+        policy_name="least_loaded_baseline",
+        policy=policy,
     )
-    row["equilibrium_policy_residual"] = float(
-        diagnostics.get("policy_residual", result.metrics.get("equilibrium_policy_residual", 0.0))
-    )
-    return row
+    return result
 
 
-def _single_node_rows(
-    result: ExperimentResult,
-    simulation_steps: int,
-) -> pd.DataFrame:
-    """Build per-node time-series data for one run."""
-    frame = pd.DataFrame(result.node_state_records)
-    if frame.empty:
-        return pd.DataFrame(
-            columns=[
-                "tick",
-                "node_id",
-                "server_id",
-                "cpu_utilization",
-                "memory_utilization",
-                "bandwidth_utilization",
-                "queue_length",
-            ]
-        )
-    return frame.loc[frame["tick"] < simulation_steps].copy()
+def _confidence_interval(values: pd.Series) -> float:
+    """Return the half-width of a 95 percent Student-t confidence interval."""
+    clean = pd.to_numeric(values, errors="coerce").dropna().to_numpy(dtype=float)
+    n = len(clean)
+    if n < 2:
+        return 0.0
+    standard_error = np.std(clean, ddof=1) / np.sqrt(n)
+    return float(t.ppf(0.975, n - 1) * standard_error)
 
 
-def _single_node_summary(
-    node_history: pd.DataFrame,
-    selection_records: list[dict],
-) -> pd.DataFrame:
-    """Summarize one-run node utilization and selection distribution."""
-    if node_history.empty:
-        return pd.DataFrame()
-
-    selection_counts = pd.Series(dtype=float)
-    if selection_records:
-        selection_counts = pd.Series(
-            [int(record["node_id"]) for record in selection_records]
-        ).value_counts()
-
+def _aggregate(raw: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate repeated benchmark observations."""
     rows = []
-    for node_id, group in node_history.groupby("node_id", sort=True):
+    for (policy, metric), group in raw.groupby(["policy", "metric"], sort=True):
+        values = group["value"].astype(float)
         rows.append(
             {
-                "node_id": int(node_id),
-                "server_id": int(group["server_id"].iloc[0]),
-                "average_cpu_utilization": float(group["cpu_utilization"].mean()),
-                "peak_cpu_utilization": float(group["cpu_utilization"].max()),
-                "final_cpu_utilization": float(group["cpu_utilization"].iloc[-1]),
-                "average_memory_utilization": float(group["memory_utilization"].mean()),
-                "average_bandwidth_utilization": float(group["bandwidth_utilization"].mean()),
-                "average_queue_length": float(group["queue_length"].mean()),
-                "tasks_selected": int(selection_counts.get(node_id, 0)),
+                "policy": policy,
+                "metric": metric,
+                "runs": int(values.count()),
+                "mean": float(values.mean()),
+                "std": float(values.std(ddof=1)) if len(values) > 1 else 0.0,
+                "min": float(values.min()),
+                "max": float(values.max()),
+                "ci95_half_width": _confidence_interval(values),
             }
         )
     return pd.DataFrame(rows)
 
 
-def _summarize_repeated_runs(raw: pd.DataFrame) -> pd.DataFrame:
-    """Calculate mean, standard deviation, and 95% t confidence interval."""
-    rows = []
-    for (policy, label), group in raw.groupby(["policy", "policy_label"], sort=False):
-        n = len(group)
-        for metric in BENCHMARK_METRICS:
-            values = group[metric].astype(float)
-            mean = float(values.mean())
-            std = float(values.std(ddof=1)) if n > 1 else 0.0
-            if n > 1:
-                margin = float(stats.t.ppf(0.975, n - 1) * std / np.sqrt(n))
-            else:
-                margin = 0.0
-            rows.append(
-                {
-                    "policy": policy,
-                    "policy_label": label,
-                    "metric": metric,
-                    "runs": int(n),
-                    "mean": mean,
-                    "std": std,
-                    "min": float(values.min()),
-                    "max": float(values.max()),
-                    "ci95_lower": mean - margin,
-                    "ci95_upper": mean + margin,
-                }
-            )
-    return pd.DataFrame(rows)
-
-
-def _summarize_repeated_nodes(node_rows: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate average CPU utilization by node across repeated runs."""
-    if node_rows.empty:
-        return pd.DataFrame()
-    return (
-        node_rows.groupby(["policy", "policy_label", "node_id", "server_id"], as_index=False)
-        .agg(
-            average_cpu_utilization_mean=("average_cpu_utilization", "mean"),
-            average_cpu_utilization_std=("average_cpu_utilization", "std"),
-            peak_cpu_utilization_mean=("peak_cpu_utilization", "mean"),
-            final_cpu_utilization_mean=("final_cpu_utilization", "mean"),
-            average_queue_length_mean=("average_queue_length", "mean"),
-            tasks_selected_mean=("tasks_selected", "mean"),
-        )
-        .fillna(0.0)
-    )
-
-
-def _generate_single_run_figure(
-    node_history: pd.DataFrame,
-    output_path: Path,
-) -> None:
-    """Generate the attached-figure-style CPU utilization benchmark plot."""
-    figure, axis = plt.subplots(figsize=(12, 6.5))
-
-    for node_id, group in node_history.groupby("node_id", sort=True):
-        axis.plot(
-            group["tick"],
-            group["cpu_utilization"] * 100.0,
-            marker="o",
-            markersize=2.5,
+def _plot_single_run(records: pd.DataFrame, path: Path) -> None:
+    """Plot all edge-node CPU utilization for one MFG run."""
+    plt.figure(figsize=(18, 10))
+    for node_id, group in records.groupby("node_id", sort=True):
+        plt.plot(
+            group["simulation_step"],
+            group["cpu_utilization"],
             linewidth=1.2,
-            label=f"Edge Node {int(node_id) + 1}",
+            marker=".",
+            markersize=2,
+            label=f"Edge Node {node_id + 1}",
         )
+    plt.title("MFG Load Balancer: Single-Run Edge CPU Utilization")
+    plt.xlabel("Simulation Tick")
+    plt.ylabel("CPU Utilization (%)")
+    plt.ylim(0, 100)
+    plt.grid(True, alpha=0.25)
+    plt.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9)
+    plt.tight_layout()
+    plt.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close()
 
-    axis.set_title("MFG Load Balancer: Single-Run Edge CPU Utilization")
-    axis.set_xlabel("Simulation Tick")
-    axis.set_ylabel("CPU Utilization (%)")
-    axis.set_ylim(0, 100)
-    axis.grid(True, alpha=0.3)
-    axis.legend(
-        loc="upper left",
-        bbox_to_anchor=(1.01, 1.0),
-        fontsize=8,
-        ncol=1,
+
+def _plot_ten_run_mean(records: pd.DataFrame, path: Path) -> None:
+    """Plot mean CPU utilization by edge node across ten runs."""
+    grouped = (
+        records.groupby(["node_id", "simulation_step"], as_index=False)["cpu_utilization"]
+        .mean()
     )
-    figure.tight_layout()
-    figure.savefig(output_path, dpi=180, bbox_inches="tight")
-    plt.close(figure)
-
-
-def _generate_repeated_time_series_figure(
-    time_series_summary: pd.DataFrame,
-    output_path: Path,
-) -> None:
-    """Plot per-node mean CPU utilization over ticks across repeated runs."""
-    mfg = time_series_summary.loc[
-        time_series_summary["policy"] == "mfg_priority"
-    ]
-    if mfg.empty:
-        return
-
-    figure, axis = plt.subplots(figsize=(12, 6.5))
-    for node_id, group in mfg.groupby("node_id", sort=True):
-        axis.plot(
-            group["tick"],
-            group["mean_cpu_utilization"] * 100.0,
+    plt.figure(figsize=(18, 10))
+    for node_id, group in grouped.groupby("node_id", sort=True):
+        plt.plot(
+            group["simulation_step"],
+            group["cpu_utilization"],
             linewidth=1.2,
-            label=f"Edge Node {int(node_id) + 1}",
+            label=f"Edge Node {node_id + 1}",
         )
-
-    axis.set_title("MFG Load Balancer: Mean Edge CPU Utilization Across 10 Runs")
-    axis.set_xlabel("Simulation Tick")
-    axis.set_ylabel("Mean CPU Utilization (%)")
-    axis.set_ylim(0, 100)
-    axis.grid(True, alpha=0.3)
-    axis.legend(
-        loc="upper left",
-        bbox_to_anchor=(1.01, 1.0),
-        fontsize=8,
-    )
-    figure.tight_layout()
-    figure.savefig(output_path, dpi=180, bbox_inches="tight")
-    plt.close(figure)
+    plt.title("MFG Load Balancer: Mean Edge CPU Utilization Across 10 Runs")
+    plt.xlabel("Simulation Tick")
+    plt.ylabel("Mean CPU Utilization (%)")
+    plt.ylim(0, 100)
+    plt.grid(True, alpha=0.25)
+    plt.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9)
+    plt.tight_layout()
+    plt.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close()
 
 
-def _generate_repeated_node_figure(
-    node_summary: pd.DataFrame,
-    output_path: Path,
-) -> None:
-    """Plot mean CPU utilization across ten runs for every edge node."""
-    mfg = node_summary.loc[node_summary["policy"] == "mfg_priority"]
-    if mfg.empty:
-        return
-
-    figure, axis = plt.subplots(figsize=(12, 6))
-    axis.bar(
-        mfg["node_id"].astype(str),
-        mfg["average_cpu_utilization_mean"] * 100.0,
-        yerr=mfg["average_cpu_utilization_std"].fillna(0.0) * 100.0,
-        capsize=3,
-    )
-    axis.set_title("MFG Load Balancer: Mean Edge CPU Utilization Across Repeated Runs")
-    axis.set_xlabel("Edge Node ID")
-    axis.set_ylabel("Mean CPU Utilization (%)")
-    axis.set_ylim(0, 100)
-    axis.grid(True, axis="y", alpha=0.3)
-    figure.tight_layout()
-    figure.savefig(output_path, dpi=180)
-    plt.close(figure)
-
-
-def _generate_metric_comparison_figure(
-    raw: pd.DataFrame,
-    metric: str,
-    output_path: Path,
-) -> None:
-    """Plot a repeated-run metric for the load balancer and baseline."""
-    groups = []
-    labels = []
-    means = []
-    errors = []
-    for policy in ("mfg_priority", "least_loaded"):
-        values = raw.loc[raw["policy"] == policy, metric].astype(float)
-        if values.empty:
-            continue
-        groups.append(policy)
-        labels.append(POLICY_LABELS[policy])
-        means.append(float(values.mean()))
-        errors.append(float(values.std(ddof=1)) if len(values) > 1 else 0.0)
-
-    if not groups:
-        return
-
-    figure, axis = plt.subplots(figsize=(8, 5))
-    axis.bar(labels, means, yerr=errors, capsize=4)
-    axis.set_title(f"10-Run Benchmark: {metric.replace('_', ' ').title()}")
-    axis.set_ylabel(metric.replace("_", " ").title())
-    axis.grid(True, axis="y", alpha=0.3)
-    figure.tight_layout()
-    figure.savefig(output_path, dpi=180)
-    plt.close(figure)
+def _plot_system_metric(aggregate: pd.DataFrame, metric: str, path: Path) -> None:
+    """Plot a single benchmark metric for MFG and baseline."""
+    data = aggregate[aggregate["metric"] == metric]
+    plt.figure(figsize=(10, 6))
+    for policy, group in data.groupby("policy", sort=True):
+        plt.errorbar(
+            [policy.replace("_", " ").title()],
+            group["mean"],
+            yerr=group["ci95_half_width"],
+            fmt="o",
+            capsize=5,
+            label=policy.replace("_", " ").title(),
+        )
+    plt.title(f"Benchmark: {metric.replace('_', ' ').title()}")
+    plt.ylabel(metric.replace("_", " ").title())
+    plt.grid(True, axis="y", alpha=0.25)
+    plt.tight_layout()
+    plt.savefig(path, dpi=180, bbox_inches="tight")
+    plt.close()
 
 
 def _write_report(
-    output_path: Path,
+    path: Path,
     config: SimulationConfig,
     seeds: tuple[int, ...],
-    single_metrics: dict,
-    repeated_summary: pd.DataFrame,
+    aggregate: pd.DataFrame,
+    filtering_summary: pd.DataFrame,
 ) -> None:
-    """Write a reproducible benchmark report."""
+    """Write the benchmark methodology and artifact index."""
     lines = [
-        "# Edge Load Balancer Benchmark",
+        "# Load Balancer Benchmark Report",
         "",
-        "## Benchmark Design",
+        "## Benchmark design",
         "",
-        f"- Single-run seed: `{seeds[0]}`",
-        f"- Repeated runs: `{len(seeds)}`",
-        f"- Simulation steps per run: `{config.simulation_steps}`",
-        f"- Tasks per step: `{config.tasks_per_step}`",
-        f"- Edge servers: `{config.number_of_servers}`",
-        f"- Edge nodes per server: `{config.nodes_per_server}`",
-        f"- Total edge nodes: `{config.number_of_servers * config.nodes_per_server}`",
-        "- Primary policy: MFG Load Balancer",
-        "- Reference policy: Least-Loaded Baseline",
-        f"- Benchmark MFG state points: `{config.mean_field_state_points}`",
-        f"- Benchmark MFG iteration limit: `{config.mean_field_max_iterations}`",
-        f"- Benchmark MFG tolerance: `{config.mean_field_tolerance}`",
-        f"- Benchmark FPK iteration limit: `{config.fpk_max_iterations}`",
-        f"- Benchmark FPK tolerance: `{config.fpk_tolerance}`",
+        f"- Simulation ticks per run: {config.benchmark_simulation_steps}",
+        f"- Number of repeated runs: {len(seeds)}",
+        f"- Seeds: {', '.join(str(seed) for seed in seeds)}",
+        f"- Edge servers: {config.number_of_servers}",
+        f"- Edge nodes per server: {config.nodes_per_server}",
+        f"- Total edge nodes: {config.number_of_servers * config.nodes_per_server}",
+        f"- Tasks per tick: {config.tasks_per_step}",
+        "- Proposed policy: Mean-Field Game load balancer",
         "",
-        "## Single-Run Results",
+        "## Resource metric units",
         "",
-        "| Metric | Value |",
-        "|---|---:|",
+        "| Resource | Unit | Meaning |",
+        "|---|---|---|",
+        "| CPU | GC/s | Gigacycles per Second |",
+        "| Memory | GB | Gigabytes |",
+        "| Bandwidth | Mbps | Megabits per Second |",
+        "| Latency | ms | Milliseconds |",
+        "| Energy | J | Joules |",
+        "| Queue | tasks | Number of Tasks |",
+        "",
+        "The MFG state and utilization metrics are normalized/dimensionless where applicable; physical resource values retain the units above.",
+        "",
+        "## Evaluation metrics",
+        "",
+        ", ".join(METRICS),
+        "",
+        "## Interpretation",
+        "",
+        "The single-run utilization figure shows the dynamic CPU load of every edge node over the full 2500-tick simulation.",
+        "The ten-run figure reports the mean utilization at every simulation tick across the ten independent seeds.",
+        "The benchmark tables report repeated-run mean, standard deviation, range, and 95 percent Student-t confidence intervals for the MFG load balancer.",
+        "Resource filtering is evaluated before policy selection and is reported separately from the MFG selection decision.",
+        "",
+        "## Generated artifacts",
+        "",
+        "- raw/single_run_metrics.csv",
+        "- raw/single_run_node_utilization.csv",
+        "- raw/ten_run_benchmark_raw.csv",
+        "- raw/ten_run_node_utilization_raw.csv",
+        "- raw/ten_run_node_utilization_time_series_raw.csv",
+        "- raw/resource_filtering_audit.csv",
+        "- aggregated/single_run_node_summary.csv",
+        "- aggregated/ten_run_benchmark_summary.csv",
+        "- aggregated/ten_run_node_utilization_summary.csv",
+        "- aggregated/ten_run_node_utilization_time_series_summary.csv",
+        "- aggregated/resource_filtering_summary.csv",
+        "- figures/single_run_node_utilization.png",
+        "- figures/ten_run_node_utilization.png",
+        "- figures/ten_run_node_utilization_time_series.png",
+        "- figures/resource_filtering_selection_audit.png",
     ]
-    for metric in BENCHMARK_METRICS:
-        lines.append(f"| {metric} | {single_metrics.get(metric, 0.0):.6f} |")
-
-    lines.extend(
-        [
-            "",
-            "## 10-Run Results",
-            "",
-            "| Policy | Metric | Mean | Std | 95% CI |",
-            "|---|---|---:|---:|---:|",
-        ]
-    )
-    for _, row in repeated_summary.iterrows():
-        lines.append(
-            f"| {row['policy_label']} | {row['metric']} | "
-            f"{row['mean']:.6f} | {row['std']:.6f} | "
-            f"[{row['ci95_lower']:.6f}, {row['ci95_upper']:.6f}] |"
-        )
-
-    lines.extend(
-        [
-            "",
-            "## Interpretation",
-            "",
-            "The single-run time-series figure shows how the load balancer distributes CPU utilization across edge nodes over simulation ticks.",
-            "The repeated-run tables report mean, standard deviation, and 95% Student-t confidence intervals so that performance is not judged from one lucky random seed.",
-            "The least-loaded policy is included as a reference baseline. It is not the proposed load balancer.",
-        ]
-    )
-    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def run_load_balancer_benchmark(
     config: SimulationConfig,
-    seeds: tuple[int, ...],
-    output_directory: str | Path,
+    seeds: tuple[int, ...] | list[int] | None = None,
+    output_directory: str | Path | None = None,
 ) -> dict[str, Path]:
-    """Run single-run and repeated-run load-balancer benchmarks."""
+    """Run the complete single-run and repeated load-balancer benchmark.
+
+    ``seeds`` and ``output_directory`` are optional overrides used by tests and
+    programmatic callers. When omitted, the benchmark uses the configured
+    seed range and writes under ``config.output_directory``.
+
+    The return value is a mapping of artifact names to their generated paths so
+    callers can consume individual benchmark outputs without reconstructing
+    the directory layout.
+    """
+    output = (
+        Path(output_directory)
+        if output_directory is not None
+        else Path(config.output_directory) / "load_balancer_benchmark"
+    )
+    raw_dir = output / "raw"
+    agg_dir = output / "aggregated"
+    fig_dir = output / "figures"
+    for directory in (raw_dir, agg_dir, fig_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    if seeds is None:
+        seeds = tuple(
+            range(
+                config.benchmark_seed_start,
+                config.benchmark_seed_start + config.benchmark_experiment_repetitions,
+            )
+        )
+    else:
+        seeds = tuple(int(seed) for seed in seeds)
+
     if not seeds:
         raise ValueError("At least one benchmark seed is required.")
 
-    output = Path(output_directory)
-    raw_dir = output / "raw"
-    aggregated_dir = output / "aggregated"
-    figures_dir = output / "figures"
-    for directory in (raw_dir, aggregated_dir, figures_dir):
-        directory.mkdir(parents=True, exist_ok=True)
-
-    primary_seed = seeds[0]
+    # The benchmark intentionally uses a 2500-tick configuration without changing
+    # the shorter simulation length used by the other research modules.
     benchmark_config = replace(
         config,
         simulation_steps=config.benchmark_simulation_steps,
+        number_of_servers=config.benchmark_number_of_servers,
+        nodes_per_server=config.benchmark_nodes_per_server,
         mean_field_state_points=config.benchmark_mean_field_state_points,
         mean_field_max_iterations=config.benchmark_mean_field_max_iterations,
-        mean_field_tolerance=config.benchmark_mean_field_tolerance,
-        mean_field_policy_tolerance=config.benchmark_mean_field_policy_tolerance,
-        mean_field_raw_policy_tolerance=config.benchmark_mean_field_raw_policy_tolerance,
         fpk_max_iterations=config.benchmark_fpk_max_iterations,
-        fpk_tolerance=config.benchmark_fpk_tolerance,
     )
-    mfg_policy, equilibrium_diagnostics = build_mean_field_policy(
-        config=replace(benchmark_config, seed=primary_seed),
+
+    metric_rows = []
+    node_rows = []
+    filtering_rows = []
+    single_result = None
+    single_diagnostics = None
+
+    # The equilibrium is deterministic for a fixed configuration and does not
+    # depend on the random workload seed. Solve it once and reuse the policy
+    # across all repeated workload runs.
+    equilibrium_policy, equilibrium_diagnostics = build_mean_field_policy(
+        config=benchmark_config,
         ablation_variant="full",
     )
-    single_result = _run_policy(
-        benchmark_config,
-        primary_seed,
-        "mfg_priority",
-        mfg_policy=mfg_policy,
-    )
-    single_history = _single_node_rows(single_result, benchmark_config.simulation_steps)
-    single_summary = _single_node_summary(
-        single_history,
-        single_result.selection_records,
-    )
 
-    single_metrics = pd.DataFrame(
-        [{
-            "seed": primary_seed,
-            **{metric: float(single_result.metrics.get(metric, 0.0)) for metric in BENCHMARK_METRICS},
-            "equilibrium_converged": bool(equilibrium_diagnostics["converged"]),
-            "equilibrium_iterations": int(equilibrium_diagnostics["iterations"]),
-            "equilibrium_distribution_residual": float(equilibrium_diagnostics["distribution_residual"]),
-            "equilibrium_policy_residual": float(equilibrium_diagnostics["policy_residual"]),
-        }]
-    )
-    single_metrics.to_csv(raw_dir / "single_run_metrics.csv", index=False)
-    single_history.to_csv(raw_dir / "single_run_node_utilization.csv", index=False)
-    single_summary.to_csv(aggregated_dir / "single_run_node_summary.csv", index=False)
+    for run_index, seed in enumerate(seeds):
+        seed_config = replace(benchmark_config, seed=seed)
+        mfg_result = run_policy_experiment(
+            config=seed_config,
+            policy_name="mfg_load_balancer",
+            policy=equilibrium_policy,
+        )
+        diagnostics = equilibrium_diagnostics
 
-    single_filtering = pd.DataFrame(
-        [
-            {
-                "seed": int(primary_seed),
-                "policy": "mfg_priority",
-                **record,
-            }
-            for record in single_result.filtering_records
-        ]
-    )
-    single_selection = pd.DataFrame(
-        [
-            {
-                "seed": int(primary_seed),
-                "policy": "mfg_priority",
-                **record,
-            }
-            for record in single_result.selection_records
-        ]
-    )
-    single_filtering.to_csv(raw_dir / "resource_filtering_audit.csv", index=False)
-    single_filtering_summary = _summarize_filtering_audit(single_filtering)
-    single_filtering_summary.to_csv(aggregated_dir / "resource_filtering_summary.csv", index=False)
-    _generate_resource_filtering_figure(
-        filtering_audit=single_filtering,
-        selection_audit=single_selection,
-        figures_directory=figures_dir,
-    )
+        if run_index == 0:
+            single_result = mfg_result
+            single_diagnostics = diagnostics
 
-    repeated_rows = []
-    repeated_node_rows = []
-    repeated_time_rows = []
-    for seed in seeds:
-        for policy_key in ("mfg_priority", "least_loaded"):
-            result = _run_policy(
-                benchmark_config,
-                seed,
-                policy_key,
-                mfg_policy=mfg_policy,
+        for metric in METRICS:
+            metric_rows.append(
+                {
+                    "run": run_index + 1,
+                    "seed": seed,
+                    "policy": "mfg_load_balancer",
+                    "metric": metric,
+                    "value": float(mfg_result.metrics[metric]),
+                }
             )
-            repeated_rows.append(
-                _metric_row(
-                    seed,
-                    policy_key,
-                    result,
-                    equilibrium_diagnostics if policy_key == "mfg_priority" else None,
+
+        for record in mfg_result.node_utilization_records:
+            node_rows.append(
+                {
+                    "run": run_index + 1,
+                    "seed": seed,
+                    "policy": "mfg_load_balancer",
+                    **record,
+                }
+            )
+
+        # The detailed resource-filtering audit is retained for the single run
+        # used in the professor-facing screenshot. Repeating every node check
+        # across all ten runs would create an unnecessarily large evidence file.
+        if run_index == 0:
+            for record in mfg_result.filtering_records:
+                filtering_rows.append(
+                    {
+                        "run": 1,
+                        "seed": seed,
+                        "policy": "mfg_load_balancer",
+                        **record,
+                    }
                 )
-            )
 
-            history = _single_node_rows(result, benchmark_config.simulation_steps)
-            if not history.empty:
-                history = history.copy()
-                history.insert(0, "policy_label", POLICY_LABELS[policy_key])
-                history.insert(0, "policy", policy_key)
-                history.insert(0, "seed", int(seed))
-                repeated_time_rows.append(history)
-            node_summary = _single_node_summary(history, result.selection_records)
-            if not node_summary.empty:
-                node_summary.insert(0, "policy_label", POLICY_LABELS[policy_key])
-                node_summary.insert(0, "policy", policy_key)
-                node_summary.insert(0, "seed", int(seed))
-                repeated_node_rows.append(node_summary)
+        # Release the large per-task audit structures before starting the next run.
+        if run_index > 0:
+            mfg_result.filtering_records.clear()
+        mfg_result.node_utilization_records.clear()
+        gc.collect()
 
-    repeated_raw = pd.DataFrame(repeated_rows)
-    repeated_summary = _summarize_repeated_runs(repeated_raw)
-    repeated_nodes_raw = pd.concat(repeated_node_rows, ignore_index=True) if repeated_node_rows else pd.DataFrame()
-    repeated_nodes_summary = _summarize_repeated_nodes(repeated_nodes_raw)
-    repeated_time_raw = pd.concat(repeated_time_rows, ignore_index=True) if repeated_time_rows else pd.DataFrame()
-    if not repeated_time_raw.empty:
-        repeated_time_summary = (
-            repeated_time_raw.groupby(
-                ["policy", "policy_label", "node_id", "server_id", "tick"],
-                as_index=False,
-            )
-            .agg(
-                mean_cpu_utilization=("cpu_utilization", "mean"),
-                std_cpu_utilization=("cpu_utilization", "std"),
-            )
-            .fillna(0.0)
-        )
-    else:
-        repeated_time_summary = pd.DataFrame()
-
-    repeated_raw.to_csv(raw_dir / "ten_run_benchmark_raw.csv", index=False)
-    repeated_summary.to_csv(aggregated_dir / "ten_run_benchmark_summary.csv", index=False)
-    repeated_nodes_raw.to_csv(raw_dir / "ten_run_node_utilization_raw.csv", index=False)
-    repeated_nodes_summary.to_csv(aggregated_dir / "ten_run_node_utilization_summary.csv", index=False)
-    repeated_time_raw.to_csv(raw_dir / "ten_run_node_utilization_time_series_raw.csv", index=False)
-    repeated_time_summary.to_csv(aggregated_dir / "ten_run_node_utilization_time_series_summary.csv", index=False)
-
-    _generate_single_run_figure(
-        single_history,
-        figures_dir / "single_run_node_utilization.png",
+    raw_metrics = pd.DataFrame(metric_rows)
+    raw_metrics.to_csv(raw_dir / "ten_run_benchmark_raw.csv", index=False)
+    raw_metrics[raw_metrics["run"] == 1].to_csv(
+        raw_dir / "single_run_metrics.csv", index=False
     )
-    _generate_repeated_node_figure(
-        repeated_nodes_summary,
-        figures_dir / "ten_run_node_utilization.png",
+
+    aggregate = _aggregate(raw_metrics)
+    aggregate.to_csv(agg_dir / "ten_run_benchmark_summary.csv", index=False)
+    aggregate[aggregate["policy"] == "mfg_load_balancer"].to_csv(
+        agg_dir / "single_run_node_summary.csv", index=False
     )
-    _generate_repeated_time_series_figure(
-        repeated_time_summary,
-        figures_dir / "ten_run_node_utilization_time_series.png",
+
+    node_data = pd.DataFrame(node_rows)
+    node_data.to_csv(raw_dir / "ten_run_node_utilization_raw.csv", index=False)
+    single_nodes = node_data[node_data["run"] == 1].copy()
+    single_nodes.to_csv(raw_dir / "single_run_node_utilization.csv", index=False)
+
+    node_summary = (
+        node_data.groupby("node_id", as_index=False)["cpu_utilization"]
+        .agg(["mean", "std", "min", "max"])
+        .reset_index()
+        .rename(columns={"node_id": "node_id"})
     )
-    for metric in BENCHMARK_METRICS:
-        _generate_metric_comparison_figure(
-            repeated_raw,
+    node_summary.to_csv(agg_dir / "ten_run_node_utilization_summary.csv", index=False)
+
+    time_summary = (
+        node_data.groupby(["node_id", "simulation_step"], as_index=False)["cpu_utilization"]
+        .agg(["mean", "std"])
+        .reset_index()
+    )
+    time_summary.to_csv(
+        agg_dir / "ten_run_node_utilization_time_series_summary.csv",
+        index=False,
+    )
+    node_data.to_csv(
+        raw_dir / "ten_run_node_utilization_time_series_raw.csv",
+        index=False,
+    )
+
+    _plot_single_run(single_nodes, fig_dir / "single_run_node_utilization.png")
+    _plot_ten_run_mean(node_data, fig_dir / "ten_run_node_utilization.png")
+    _plot_ten_run_mean(node_data, fig_dir / "ten_run_node_utilization_time_series.png")
+
+    for metric in METRICS:
+        _plot_system_metric(
+            aggregate,
             metric,
-            figures_dir / f"ten_run_{metric}.png",
+            fig_dir / f"ten_run_{metric}.png",
         )
 
-    report_path = output / "load_balancer_benchmark_report.md"
+    filtering_data = pd.DataFrame(filtering_rows)
+    filtering_data.to_csv(raw_dir / "resource_filtering_audit.csv", index=False)
+    filtering_summary = _summarize_filtering_audit(filtering_data)
+    filtering_summary.to_csv(
+        agg_dir / "resource_filtering_summary.csv",
+        index=False,
+    )
+
+    # Reuse the project's audit renderer, but force a representative task from
+    # the full 2500-tick benchmark and the actual MFG selection records.
+    selection_rows = []
+    for record in single_result.selection_records:
+        selection_rows.append(
+            {
+                "seed": config.benchmark_seed_start,
+                "policy": "mfg_load_balancer",
+                **record,
+            }
+        )
+    selection_data = pd.DataFrame(selection_rows)
+    _generate_resource_filtering_figure(
+        filtering_audit=filtering_data[filtering_data["run"] == 1].copy(),
+        selection_audit=selection_data,
+        figures_directory=fig_dir,
+    )
+
+    pd.DataFrame(
+        [
+            {
+                "seed": config.benchmark_seed_start,
+                "equilibrium_converged": single_diagnostics["converged"],
+                "equilibrium_iterations": single_diagnostics["iterations"],
+                "distribution_residual": single_diagnostics["distribution_residual"],
+                "policy_residual": single_diagnostics["policy_residual"],
+            }
+        ]
+    ).to_csv(agg_dir / "single_run_equilibrium_diagnostics.csv", index=False)
+
     _write_report(
-        report_path,
+        output / "load_balancer_benchmark_report.md",
         benchmark_config,
         seeds,
-        single_result.metrics,
-        repeated_summary,
+        aggregate,
+        filtering_summary,
     )
 
     return {
-        "single_metrics": raw_dir / "single_run_metrics.csv",
-        "single_node_utilization": raw_dir / "single_run_node_utilization.csv",
-        "single_node_summary": aggregated_dir / "single_run_node_summary.csv",
+        "output_directory": output,
+        "single_run_metrics": raw_dir / "single_run_metrics.csv",
+        "single_run_node_utilization": raw_dir / "single_run_node_utilization.csv",
+        "ten_run_benchmark_raw": raw_dir / "ten_run_benchmark_raw.csv",
+        "ten_run_node_utilization_raw": raw_dir / "ten_run_node_utilization_raw.csv",
+        "ten_run_node_utilization_time_series_raw": raw_dir / "ten_run_node_utilization_time_series_raw.csv",
         "resource_filtering_audit": raw_dir / "resource_filtering_audit.csv",
-        "resource_filtering_summary": aggregated_dir / "resource_filtering_summary.csv",
-        "resource_filtering_figure": figures_dir / "resource_filtering_selection_audit.png",
-        "ten_run_raw": raw_dir / "ten_run_benchmark_raw.csv",
-        "ten_run_summary": aggregated_dir / "ten_run_benchmark_summary.csv",
-        "ten_run_node_raw": raw_dir / "ten_run_node_utilization_raw.csv",
-        "ten_run_node_summary": aggregated_dir / "ten_run_node_utilization_summary.csv",
-        "ten_run_time_series_raw": raw_dir / "ten_run_node_utilization_time_series_raw.csv",
-        "ten_run_time_series_summary": aggregated_dir / "ten_run_node_utilization_time_series_summary.csv",
-        "single_figure": figures_dir / "single_run_node_utilization.png",
-        "ten_run_node_figure": figures_dir / "ten_run_node_utilization.png",
-        "ten_run_time_series_figure": figures_dir / "ten_run_node_utilization_time_series.png",
-        "report": report_path,
+        "single_run_node_summary": agg_dir / "single_run_node_summary.csv",
+        "ten_run_benchmark_summary": agg_dir / "ten_run_benchmark_summary.csv",
+        "ten_run_node_utilization_summary": agg_dir / "ten_run_node_utilization_summary.csv",
+        "ten_run_node_utilization_time_series_summary": agg_dir / "ten_run_node_utilization_time_series_summary.csv",
+        "resource_filtering_summary": agg_dir / "resource_filtering_summary.csv",
+        "single_run_graph": fig_dir / "single_run_node_utilization.png",
+        "ten_run_graph": fig_dir / "ten_run_node_utilization.png",
+        "ten_run_time_series_graph": fig_dir / "ten_run_node_utilization_time_series.png",
+        "resource_filtering_screenshot": fig_dir / "resource_filtering_selection_audit.png",
+        "benchmark_report": output / "load_balancer_benchmark_report.md",
     }
