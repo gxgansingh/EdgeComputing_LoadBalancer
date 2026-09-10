@@ -12,11 +12,16 @@ class EdgeNode:
     node_id: int
     server_id: int
 
+    # CPU capacity and available CPU are measured in GC/s.
     cpu_capacity: float
+    # Memory capacity and available memory are measured in GB.
     memory_capacity: float
+    # Network bandwidth capacity and availability are measured in Mbps.
     bandwidth_capacity: float
+    # Energy capacity is measured in Joules.
     energy_capacity: float
 
+    # Queue length is the number of active/queued tasks.
     queue_length: int = 0
 
     available_cpu: float = 0.0
@@ -49,7 +54,10 @@ class EdgeNode:
         self,
         task: Task,
     ) -> bool:
-        """Return whether the node satisfies task requirements."""
+        """Return whether the node satisfies CPU, memory, and bandwidth requirements.
+
+        CPU is measured in GC/s, memory in GB, and bandwidth in Mbps.
+        """
 
         return (
             self.available_cpu
@@ -133,7 +141,10 @@ class EdgeNode:
         high_priority_weight: float = 1.50,
         critical_priority_weight: float = 1.75,
     ) -> float:
-        """Calculate the effective processing rate."""
+        """Calculate the effective processing rate in GC/s.
+
+        The returned rate is expressed in the same GC/s unit as CPU capacity.
+        """
 
         if reference_cpu_capacity <= 0.0:
             raise ValueError(
