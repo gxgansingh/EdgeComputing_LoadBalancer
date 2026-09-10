@@ -1408,7 +1408,7 @@ def test_module2_generates_resource_filtering_selection_audit(tmp_path) -> None:
     ).exists()
 
 
-def test_load_balancer_benchmark_generates_single_and_ten_run_outputs(tmp_path):
+def test_load_balancer_benchmark_generates_single_and_ten_run_outputs(tmp_path) -> None:
     """Benchmark must generate tabular, plotting, and filtering evidence."""
     from src.edge_game.config import SimulationConfig
     from src.edge_game.experiments.benchmark import run_load_balancer_benchmark
@@ -1422,23 +1422,29 @@ def test_load_balancer_benchmark_generates_single_and_ten_run_outputs(tmp_path):
         mean_field_max_iterations=5,
         fpk_max_iterations=20,
         benchmark_simulation_steps=4,
+        benchmark_number_of_servers=1,
+        benchmark_nodes_per_server=3,
         benchmark_mean_field_state_points=11,
         benchmark_mean_field_max_iterations=5,
         benchmark_fpk_max_iterations=20,
     )
 
+    output_directory = tmp_path / "benchmark"
     outputs = run_load_balancer_benchmark(
         config=config,
         seeds=(42, 43),
-        output_directory=tmp_path / "benchmark",
+        output_directory=output_directory,
     )
 
+    assert outputs["output_directory"] == output_directory
     for path in outputs.values():
         assert path.exists()
-
-    assert (tmp_path / "benchmark" / "raw" / "single_run_metrics.csv").exists()
-    assert (tmp_path / "benchmark" / "raw" / "ten_run_benchmark_raw.csv").exists()
-    assert (tmp_path / "benchmark" / "aggregated" / "ten_run_benchmark_summary.csv").exists()
-    assert (tmp_path / "benchmark" / "raw" / "resource_filtering_audit.csv").exists()
-    assert (tmp_path / "benchmark" / "figures" / "single_run_node_utilization.png").exists()
-    assert (tmp_path / "benchmark" / "figures" / "resource_filtering_selection_audit.png").exists()
+    assert (output_directory / "raw" / "single_run_metrics.csv").exists()
+    assert (output_directory / "raw" / "single_run_node_utilization.csv").exists()
+    assert (output_directory / "raw" / "ten_run_benchmark_raw.csv").exists()
+    assert (output_directory / "raw" / "ten_run_node_utilization_raw.csv").exists()
+    assert (output_directory / "aggregated" / "ten_run_benchmark_summary.csv").exists()
+    assert (output_directory / "aggregated" / "ten_run_node_utilization_summary.csv").exists()
+    assert (output_directory / "figures" / "single_run_node_utilization.png").exists()
+    assert (output_directory / "figures" / "ten_run_node_utilization_time_series.png").exists()
+    assert (output_directory / "figures" / "resource_filtering_selection_audit.png").exists()
